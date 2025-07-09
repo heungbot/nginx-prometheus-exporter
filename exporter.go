@@ -93,7 +93,8 @@ var (
 	sslClientKey  = kingpin.Flag("nginx.ssl-client-key", "Path to the PEM encoded client certificate key file to use when connecting to the server.").Default("").Envar("SSL_CLIENT_KEY").String()
 
 	// Custom command-line flags.
-	timeout = createPositiveDurationFlag(kingpin.Flag("nginx.timeout", "A timeout for scraping metrics from NGINX or NGINX Plus.").Default("5s").Envar("TIMEOUT").HintOptions("5s", "10s", "30s", "1m", "5m"))
+	timeout         = createPositiveDurationFlag(kingpin.Flag("nginx.timeout", "A timeout for scraping metrics from NGINX or NGINX Plus.").Default("5s").Envar("TIMEOUT").HintOptions("5s", "10s", "30s", "1m", "5m"))
+	nginxConfigPath = kingpin.Flag("nginx.config-path", "Path to the NGINX configuration file.").Default("/etc/nginx/nginx.conf").Envar("CONFIG_PATH").String()
 )
 
 const exporterName = "nginx_exporter"
@@ -240,6 +241,8 @@ func registerCollector(logger *slog.Logger, transport *http.Transport,
 			os.Exit(1)
 		}
 
+		// scrape-uri가 unix 경로로 시작하는 경우, transport.DialContext를 재설정한다.
+		// 즉, 표준 TCP 연결 대신, 유닉스 도메인 소켓을 사용하도록 지시한다.
 		transport.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
 		}
@@ -248,6 +251,8 @@ func registerCollector(logger *slog.Logger, transport *http.Transport,
 
 	userAgent := fmt.Sprintf("NGINX-Prometheus-Exporter/v%v", common_version.Version)
 
+	// HTTP 클라를 생성하는데, 다른 점이 있다면, userAgentRoundTripper를 사용한다는 것이다.
+	// userAgentRoundTripper는 HTTP 요청에 User-Agent 헤더를 추가하는 역할을 한다.
 	httpClient := &http.Client{
 		Timeout: *timeout,
 		Transport: &userAgentRoundTripper{
@@ -265,15 +270,18 @@ func registerCollector(logger *slog.Logger, transport *http.Transport,
 		variableLabelNames := collector.NewVariableLabelNames(nil, nil, nil, nil, nil, nil, nil)
 		prometheus.MustRegister(collector.NewNginxPlusCollector(plusClient, "nginxplus", variableLabelNames, labels, logger))
 
-		// 여기서 Nginx Client를 사용하여 stub_status를 수집한다.
 	} else {
+		// 여기서 Nginx Client를 사용하여 stub_status를 수집한다.
 		ossClient := client.NewNginxClient(httpClient, addr)
-		prometheus.MustRegister(collector.NewNginxCollector(ossClient, "nginx", labels, logger))
+		prometheus.MustRegister(collector.NewNginxCollector(ossClient, "nginx", labels, logger, *nginxConfigPath))
 	}
 }
 
 // RTT(Round Trip Time) : 패킷이 클라이언트와 서버 사이를 왕복하는데 걸리는 시간
 // 즉, RoundTrip은 HTTP 요청을 보내고 응답을 받는 과정을 의미한다.
+// userAgentRoundTripper 기존 http.RoundTripper를 감싸서, 요청을 보내기 전에 User-Agent 헤더를 추가한다.
+// 더불어 구현한 method는 모두 RoundTripper Interface에 속하기 위한 메서드이다. 즉, 코드에서 메서드를 직접 호출하지 않아도 사용되는 것이다.
+
 type userAgentRoundTripper struct {
 	rt    http.RoundTripper
 	agent string
@@ -291,9 +299,9 @@ func (rt *userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 func cloneRequest(req *http.Request) *http.Request {
 	r := new(http.Request)
-	*r = *req // shallow clone
+	*r = *req // 얕은 복사
 
-	// deep copy headers
+	// 깊은 복사
 	r.Header = make(http.Header, len(req.Header))
 	for key, values := range req.Header {
 		newValues := make([]string, len(values))

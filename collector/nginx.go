@@ -1,7 +1,12 @@
 package collector
 
 import (
+	"fmt"
+	"io/fs"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/nginx/nginx-prometheus-exporter/client"
@@ -15,10 +20,14 @@ type NginxCollector struct {
 	nginxClient *client.NginxClient
 	metrics     map[string]*prometheus.Desc
 	mutex       sync.Mutex
+
+	// Custom For Nginx Proxy //
+	nginxConfigPath string
+	configModDesc   *prometheus.Desc
 }
 
 // NewNginxCollector creates an NginxCollector.
-func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constLabels map[string]string, logger *slog.Logger) *NginxCollector {
+func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constLabels map[string]string, logger *slog.Logger, nginxConfigPath string) *NginxCollector {
 	return &NginxCollector{
 		nginxClient: nginxClient,
 		logger:      logger,
@@ -32,6 +41,12 @@ func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constL
 			"http_requests_total":  newGlobalMetric(namespace, "http_requests_total", "Total http requests", constLabels),
 		},
 		upMetric: newUpMetric(namespace, constLabels),
+		configModDesc: prometheus.NewDesc(
+			prometheus.BuildFQName(namespace, "config", "last_modified_seconds"),
+			"NGINX config 파일별 마지막 수정 시각(Unix timestamp)",
+			[]string{"file"}, constLabels,
+		),
+		nginxConfigPath: nginxConfigPath,
 	}
 }
 
@@ -43,6 +58,8 @@ func (c *NginxCollector) Describe(ch chan<- *prometheus.Desc) {
 	for _, m := range c.metrics {
 		ch <- m
 	}
+
+	ch <- c.configModDesc
 }
 
 // Collect fetches metrics from NGINX and sends them to the provided channel.
@@ -75,4 +92,31 @@ func (c *NginxCollector) Collect(ch chan<- prometheus.Metric) {
 		prometheus.GaugeValue, float64(stats.Connections.Waiting))
 	ch <- prometheus.MustNewConstMetric(c.metrics["http_requests_total"],
 		prometheus.CounterValue, float64(stats.Requests))
+
+	////// CUSTOM FOR NGINX PROXY //////
+	files := []string{c.nginxConfigPath}                                 // []string{"/home1/irteam/apps/nginx/nginx.conf"}
+	confdDir := filepath.Join(filepath.Dir(c.nginxConfigPath), "conf.d") // "/home1/irteam/apps/nginx/conf.d"
+	// 순회 하면서 files slice 추가.
+	_ = filepath.WalkDir(confdDir, func(path string, dir fs.DirEntry, err error) error {
+		if err == nil && !dir.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	c.logger.Info(fmt.Sprintf("FILES: %v", files))
+
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err != nil || !strings.HasSuffix(info.Name(), ".conf") {
+			c.logger.Warn("skip config file", "file", f, "err", err)
+			continue
+		}
+		ch <- prometheus.MustNewConstMetric(
+			c.configModDesc,
+			prometheus.GaugeValue,
+			float64(info.ModTime().Unix()),
+			f,
+		)
+	}
 }

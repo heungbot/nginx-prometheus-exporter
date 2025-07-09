@@ -33,6 +33,7 @@ import (
 )
 
 // positiveDuration is a wrapper of time.Duration to ensure only positive values are accepted.
+// Timeout Flag에 음수가 들어오는 것을 방지하기 위해 사용한다.
 type positiveDuration struct{ time.Duration }
 
 func (pd *positiveDuration) Set(s string) error {
@@ -92,7 +93,8 @@ var (
 	sslClientKey  = kingpin.Flag("nginx.ssl-client-key", "Path to the PEM encoded client certificate key file to use when connecting to the server.").Default("").Envar("SSL_CLIENT_KEY").String()
 
 	// Custom command-line flags.
-	timeout = createPositiveDurationFlag(kingpin.Flag("nginx.timeout", "A timeout for scraping metrics from NGINX or NGINX Plus.").Default("5s").Envar("TIMEOUT").HintOptions("5s", "10s", "30s", "1m", "5m"))
+	timeout         = createPositiveDurationFlag(kingpin.Flag("nginx.timeout", "A timeout for scraping metrics from NGINX or NGINX Plus.").Default("5s").Envar("TIMEOUT").HintOptions("5s", "10s", "30s", "1m", "5m"))
+	nginxConfigPath = kingpin.Flag("nginx.config-path", "Path to the NGINX configuration file.").Default("/etc/nginx/nginx.conf").Envar("CONFIG_PATH").String()
 )
 
 const exporterName = "nginx_exporter"
@@ -109,9 +111,9 @@ func main() {
 		}
 	}
 
-	config := &promslog.Config{}
+	config := &promslog.Config{} // Log 설정을 위한 구조체 생성
 
-	flag.AddFlags(kingpin.CommandLine, config)
+	flag.AddFlags(kingpin.CommandLine, config) // log관련 flag 추가
 	kingpin.Version(common_version.Print(exporterName))
 	kingpin.HelpFlag.Short('h')
 
@@ -123,6 +125,7 @@ func main() {
 	logger.Info("nginx-prometheus-exporter", "version", common_version.Info())
 	logger.Info("build context", "build_context", common_version.BuildContext())
 
+	// exporter의 이름 및 버전 등의 정보를 /metrics 경로에 함께 노출하도록 등록
 	prometheus.MustRegister(version.NewCollector(exporterName))
 
 	if len(*scrapeURIs) == 0 {
@@ -160,6 +163,8 @@ func main() {
 		TLSClientConfig: sslConfig,
 	}
 
+	// scrapeURIs는 여러 개일 수 있으므로, 각각에 대해 collector를 등록한다.
+	// 여러 개일 경우, constLabels에 addr라는 레이블을 추가하여 구분할 수 있도록 한다.
 	if len(*scrapeURIs) == 1 {
 		registerCollector(logger, transport, (*scrapeURIs)[0], constLabels)
 	} else {
@@ -195,13 +200,17 @@ func main() {
 		http.Handle("/", landingPage)
 	}
 
+	// graceful shutdown을 위해 signal.NotifyContext를 사용한다.
+	// 인자로 받은 os.Interrupt, os.Kill, syscall.SIGTERM 시그널을 감지 시, 자동으로 취소되는 context이다.
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill, syscall.SIGTERM)
 	defer cancel()
 
-	srv := &http.Server{
+	srv := &http.Server{ // HTTP 서버 인스턴스 생성
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
+	// 별도의 goroutine에서 HTTP 서버를 시작.
+	// 이후 <-ctx.Done()이 올 때 까지 대기.
 	go func() {
 		if err := web.ListenAndServe(srv, webConfig, logger); err != nil {
 			if errors.Is(err, http.ErrServerClosed) {
@@ -213,8 +222,10 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done()
+	<-ctx.Done() // Context에 Done 시그널을 보내 goroutine을 종료하고, 대기 중이던 메인 goroutine이 진행된다.
 	logger.Info("shutting down")
+
+	// 서버가 종료 신호를 받았을 때 클라 요청을 안전하게 마무리하고 종료하기 위해, 서버 종료 작업에 최대 5초의 제한 시간을 둔 컨텍스트를 생성.
 	srvCtx, srvCancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer srvCancel()
 	_ = srv.Shutdown(srvCtx)
@@ -230,6 +241,8 @@ func registerCollector(logger *slog.Logger, transport *http.Transport,
 			os.Exit(1)
 		}
 
+		// scrape-uri가 unix 경로로 시작하는 경우, transport.DialContext를 재설정한다.
+		// 즉, 표준 TCP 연결 대신, 유닉스 도메인 소켓을 사용하도록 지시한다.
 		transport.DialContext = func(_ context.Context, _, _ string) (net.Conn, error) {
 			return net.Dial("unix", socketPath)
 		}
@@ -238,6 +251,8 @@ func registerCollector(logger *slog.Logger, transport *http.Transport,
 
 	userAgent := fmt.Sprintf("NGINX-Prometheus-Exporter/v%v", common_version.Version)
 
+	// HTTP 클라를 생성하는데, 다른 점이 있다면, userAgentRoundTripper를 사용한다는 것이다.
+	// userAgentRoundTripper는 HTTP 요청에 User-Agent 헤더를 추가하는 역할을 한다.
 	httpClient := &http.Client{
 		Timeout: *timeout,
 		Transport: &userAgentRoundTripper{
@@ -254,11 +269,18 @@ func registerCollector(logger *slog.Logger, transport *http.Transport,
 		}
 		variableLabelNames := collector.NewVariableLabelNames(nil, nil, nil, nil, nil, nil, nil)
 		prometheus.MustRegister(collector.NewNginxPlusCollector(plusClient, "nginxplus", variableLabelNames, labels, logger))
+
 	} else {
+		// 여기서 Nginx Client를 사용하여 stub_status를 수집한다.
 		ossClient := client.NewNginxClient(httpClient, addr)
-		prometheus.MustRegister(collector.NewNginxCollector(ossClient, "nginx", labels, logger))
+		prometheus.MustRegister(collector.NewNginxCollector(ossClient, "nginx", labels, logger, *nginxConfigPath))
 	}
 }
+
+// RTT(Round Trip Time) : 패킷이 클라이언트와 서버 사이를 왕복하는데 걸리는 시간
+// 즉, RoundTrip은 HTTP 요청을 보내고 응답을 받는 과정을 의미한다.
+// userAgentRoundTripper 기존 http.RoundTripper를 감싸서, 요청을 보내기 전에 User-Agent 헤더를 추가한다.
+// 더불어 구현한 method는 모두 RoundTripper Interface에 속하기 위한 메서드이다. 즉, 코드에서 메서드를 직접 호출하지 않아도 사용되는 것이다.
 
 type userAgentRoundTripper struct {
 	rt    http.RoundTripper
@@ -277,9 +299,9 @@ func (rt *userAgentRoundTripper) RoundTrip(req *http.Request) (*http.Response, e
 
 func cloneRequest(req *http.Request) *http.Request {
 	r := new(http.Request)
-	*r = *req // shallow clone
+	*r = *req // 얕은 복사
 
-	// deep copy headers
+	// 깊은 복사
 	r.Header = make(http.Header, len(req.Header))
 	for key, values := range req.Header {
 		newValues := make([]string, len(values))

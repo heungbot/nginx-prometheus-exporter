@@ -29,7 +29,7 @@ test: ## Run tests
 
 .PHONY: container
 container: ## Build container image
-	docker build --build-arg VERSION=$(VERSION) --target container -f build/Dockerfile -t $(PREFIX):$(TAG) .
+	docker buildx build --platform linux/amd64 --build-arg VERSION=$(VERSION) --target container -f build/Dockerfile -t $(PREFIX):$(TAG) .
 
 .PHONY: push
 push: container ## Push container image

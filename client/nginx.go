@@ -128,7 +128,7 @@ func (client *NginxClient) GetCustomStats(nginxConfigPath string) (*CustomStats,
 	files := []string{nginxConfigPath}
 	confDir := filepath.Join(filepath.Dir(nginxConfigPath), "conf.d")
 	_ = filepath.WalkDir(confDir, func(path string, dir fs.DirEntry, err error) error {
-		if err == nil && !dir.IsDir() {
+		if err == nil && !dir.IsDir() && filepath.Ext(path) == ".conf" {
 			files = append(files, path)
 		}
 		return nil

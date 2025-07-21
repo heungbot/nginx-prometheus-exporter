@@ -1,73 +1,42 @@
 package client
 
 import (
-	"fmt"
 	"net"
-	"os"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// getProxyPassTarget : nginx.conf를 읽어 proxy_pass target을 가져오는 함수.
-func extractProxyTarget(filePath string) ([]string, error) {
-	content, err := os.ReadFile(filePath)
-	if err != nil {
-		return nil, err
-	}
-	contentStr := string(content)
+// findAllUpstreamServers : nginx 설정 파일 내용에서 모든 upstream 블록과 서버 목록을 찾아 map으로 반환하는 함수.
+func findAllUpstreamServers(content string) (map[string][]string, error) {
+	upstreams := make(map[string][]string)
 
-	re := regexp.MustCompile(`proxy_pass\s+(.*?);`)
-	matches := re.FindAllStringSubmatch(contentStr, -1)
+	reUpstreamBlock := regexp.MustCompile(`upstream\s+([^\s{]+)\s*\{([\s\S]*?)\}`)
+	allUpstreamMatches := reUpstreamBlock.FindAllStringSubmatch(content, -1)
 
-	var targets []string
-	for _, match := range matches {
-		if len(match) > 1 {
-			// match[1]은 proxy_pass 뒤의 URL 또는 upstream 이름. 해당 이름에 대해 전처리 수행.
-			target := strings.TrimSpace(match[1])
-			target = strings.TrimPrefix(target, "http://")
-			target = strings.TrimPrefix(target, "https://")
+	reServer := regexp.MustCompile(`server\s+([^; ]+);`)
 
-			// 전처리된 이름이 IP or 도메인 형식이 아닐 아닐 경우, upstream 으로 간주.
-			ipFormat := regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(:\d+)?$`)
-			domainFormat := regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*(:\d+)?$`)
+	for _, upstreamMatch := range allUpstreamMatches {
+		if len(upstreamMatch) < 3 {
+			continue
+		}
+		upstreamName := upstreamMatch[1]
+		upstreamContent := upstreamMatch[2]
 
-			if !ipFormat.MatchString(target) && !domainFormat.MatchString(target) {
-				upstreamServers, err := findUpstreamServers(contentStr, target)
-				if err == nil {
-					targets = append(targets, upstreamServers...)
-				}
-			} else {
-				targets = append(targets, target)
+		var servers []string
+		serverMatches := reServer.FindAllStringSubmatch(upstreamContent, -1)
+		for _, serverMatch := range serverMatches {
+			if len(serverMatch) > 1 {
+				servers = append(servers, serverMatch[1])
 			}
 		}
-	}
 
-	return targets, nil
-}
-
-// findUpstreamServers : upstream 블록에서 서버 주소를 찾습니다.
-func findUpstreamServers(content, upstreamName string) ([]string, error) {
-	// upstream 블록을 찾는 정규식
-	reUpstreamBlock := regexp.MustCompile(fmt.Sprintf(`upstream\s+%s\s*\{([\s\S]*?)\}`, regexp.QuoteMeta(upstreamName)))
-	blockMatch := reUpstreamBlock.FindStringSubmatch(content)
-	if len(blockMatch) < 2 {
-		return nil, fmt.Errorf("upstream block '%s' not found", upstreamName)
-	}
-	upstreamContent := blockMatch[1]
-
-	// upstream 블록 내에서 server 주소를 찾는 정규식
-	reServer := regexp.MustCompile(`server\s+([^; ]+);`)
-	serverMatches := reServer.FindAllStringSubmatch(upstreamContent, -1)
-
-	var servers []string
-	for _, serverMatch := range serverMatches {
-		if len(serverMatch) > 1 {
-			servers = append(servers, serverMatch[1])
+		if len(servers) > 0 {
+			upstreams[upstreamName] = servers
 		}
 	}
 
-	return servers, nil
+	return upstreams, nil
 }
 
 // tcpTest : proxyTarget 인자를 받아 TCP 연결을 테스트하는 함수.
@@ -76,7 +45,7 @@ func tcpTest(proxyTarget string) (result HealthCheckResult, err error) {
 		proxyTarget = proxyTarget + ":80"
 	}
 
-	conn, err := net.DialTimeout("tcp", proxyTarget, 3*time.Second)
+	conn, err := net.DialTimeout("tcp", proxyTarget, 5*time.Second)
 	if err != nil {
 		return TcpFailure, nil
 	} else if conn != nil {

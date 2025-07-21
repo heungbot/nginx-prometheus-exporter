@@ -51,7 +51,7 @@ func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constL
 			// nginx_upstream_health_check_status
 			prometheus.BuildFQName(namespace, "upstream", "health_check_status"),
 			"Proxy Target의 TCP 연결 상태(1: 성공, 0: 실패)",
-			[]string{"file", "target"}, constLabels,
+			[]string{"file", "target", "target_name"}, constLabels,
 		),
 	}
 }
@@ -120,8 +120,9 @@ func (c *NginxCollector) Collect(ch chan<- prometheus.Metric) {
 				c.upstreamHealthCheckDesc,
 				prometheus.GaugeValue,
 				float64(health.Health),
-				file,
 				health.Target,
+				file,
+				health.TargetUpstreamName,
 			)
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -42,8 +43,9 @@ type StubConnections struct {
 
 // UpstreamTargetHealth 개별 프록시 타겟의 헬스체크 상태를 저장하는 구조체.
 type UpstreamTargetHealth struct {
-	Target string
-	Health HealthCheckResult
+	Target             string // Proxy Target 주소(IP)
+	TargetUpstreamName string // Proxy Target의 Upstream 이름
+	Health             HealthCheckResult
 }
 
 // CustomStats 모든 설정 파일의 통계를 파일 경로를 키로 하여 맵으로 저장하는 구조체.
@@ -52,6 +54,7 @@ type CustomStats struct {
 	UpstreamHealths map[string][]UpstreamTargetHealth
 }
 
+// HealthCheckResult : 헬스체크 결과를 나타내는 타입 1.0은 성공을 의미하며, 0.0은 실패를 의미한다.
 type HealthCheckResult float32
 
 const (
@@ -141,17 +144,27 @@ func (client *NginxClient) GetCustomStats(nginxConfigPath string) (*CustomStats,
 		}
 
 		customStats.ModifiedTimes[file] = info.ModTime()
-
-		proxyTargetServers, _ := extractProxyTarget(file)
+		fileContent, _ := os.ReadFile(file)
+		upstreamTargets, _ := findAllUpstreamServers(string(fileContent))
 
 		var healths []UpstreamTargetHealth
-		for _, target := range proxyTargetServers {
-			result, _ := tcpTest(target)
-			healths = append(healths, UpstreamTargetHealth{
-				Target: target,
-				Health: result,
-			})
+		var wg sync.WaitGroup
+		// var mu sync.Mutex
+		for upstreamName, targets := range upstreamTargets {
+			for _, target := range targets {
+				wg.Add(len(targets))
+				go func(upstreamName, target string) {
+					defer wg.Done()
+					result, _ := tcpTest(target)
+					healths = append(healths, UpstreamTargetHealth{
+						Target:             target,
+						TargetUpstreamName: upstreamName,
+						Health:             result,
+					})
+				}(upstreamName, target)
+			}
 		}
+		wg.Wait()
 		customStats.UpstreamHealths[file] = healths
 	}
 	return customStats, nil

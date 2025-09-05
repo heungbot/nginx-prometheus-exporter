@@ -7,14 +7,12 @@ import (
 	"time"
 )
 
-// findAllUpstreamServers : nginx 설정 파일 내용에서 모든 upstream 블록과 서버 목록을 찾아 map으로 반환하는 함수.
+// findAllUpstreamServers : NGINX 설정 파일에서 모든 Upstream Block을 찾아서 map 형태로 반환하는 함수
 func findAllUpstreamServers(content string) (map[string][]string, error) {
 	upstreams := make(map[string][]string)
-
 	reUpstreamBlock := regexp.MustCompile(`upstream\s+([^\s{]+)\s*\{([\s\S]*?)\}`)
 	allUpstreamMatches := reUpstreamBlock.FindAllStringSubmatch(content, -1)
-
-	reServer := regexp.MustCompile(`server\s+([^; ]+);`)
+	reServer := regexp.MustCompile(`(?m)^\s*server\s+([^; ]+);`)
 
 	for _, upstreamMatch := range allUpstreamMatches {
 		if len(upstreamMatch) < 3 {
@@ -37,6 +35,27 @@ func findAllUpstreamServers(content string) (map[string][]string, error) {
 	}
 
 	return upstreams, nil
+}
+
+// findProxyPassNotUpstream : NGINX 설정 파일에서 Upstream Block에 정의되지 않은 proxy_pass 대상들을 찾아서 반환하는 함수
+func findProxyPassNotUpstream(content string) ([]string, error) {
+	//re := regexp.MustCompile(`proxy_pass\s+(?:http://)?([^; ]*\.[^; ]+);`)
+	re := regexp.MustCompile(`(?m)^\s*proxy_pass\s+(?:http://)?([^; ]*\.[^; ]+);`)
+	matches := re.FindAllStringSubmatch(content, -1)
+
+	var targets []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			target := match[1]
+			// target이 IP 주소 또는 도메인 이름 형식인지 확인
+			// upstream 이름과 같은 경우는 보통 '.'이나 ':'를 포함하지 않음
+			if strings.Contains(target, ".") || strings.Contains(target, ":") {
+				targets = append(targets, target)
+			}
+		}
+	}
+
+	return targets, nil
 }
 
 // tcpTest : proxyTarget 인자를 받아 TCP 연결을 테스트하는 함수.

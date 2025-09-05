@@ -130,6 +130,7 @@ func (client *NginxClient) GetCustomStats(nginxConfigPath string) (*CustomStats,
 
 	files := []string{nginxConfigPath}
 	confDir := filepath.Join(filepath.Dir(nginxConfigPath), "conf.d")
+
 	_ = filepath.WalkDir(confDir, func(path string, dir fs.DirEntry, err error) error {
 		if err == nil && !dir.IsDir() && filepath.Ext(path) == ".conf" {
 			files = append(files, path)
@@ -137,35 +138,75 @@ func (client *NginxClient) GetCustomStats(nginxConfigPath string) (*CustomStats,
 		return nil
 	})
 
+	var (
+		wg      sync.WaitGroup
+		statsMu sync.Mutex
+	)
+
+	// 파일 목록에 대한 병렬 처리를 위해 Goroutine 생성.
 	for _, file := range files {
-		info, err := os.Stat(file)
-		if err != nil {
-			continue
-		}
+		wg.Add(1)
 
-		customStats.ModifiedTimes[file] = info.ModTime()
-		fileContent, _ := os.ReadFile(file)
-		upstreamTargets, _ := findAllUpstreamServers(string(fileContent))
+		go func(file string) {
+			defer wg.Done()
 
-		var healths []UpstreamTargetHealth
-		var wg sync.WaitGroup
-		// var mu sync.Mutex
-		for upstreamName, targets := range upstreamTargets {
-			for _, target := range targets {
-				wg.Add(len(targets))
-				go func(upstreamName, target string) {
-					defer wg.Done()
-					result, _ := tcpTest(target)
-					healths = append(healths, UpstreamTargetHealth{
-						Target:             target,
-						TargetUpstreamName: upstreamName,
-						Health:             result,
-					})
-				}(upstreamName, target)
+			info, err := os.Stat(file)
+			if err != nil {
+				return
 			}
-		}
-		wg.Wait()
-		customStats.UpstreamHealths[file] = healths
+
+			fileContent, err := os.ReadFile(file)
+			if err != nil {
+				return
+			}
+
+			upstreamTargets, _ := findAllUpstreamServers(string(fileContent))
+			noneUpstreamTargets, _ := findProxyPassNotUpstream(string(fileContent))
+			if len(noneUpstreamTargets) > 0 {
+				upstreamTargets["none_upstream"] = noneUpstreamTargets
+			}
+
+			// Upstream Targets가 없는 경우, 파일의 수정 시각만 업데이트하고 종료
+			// 공유 변수에 접근하기 때문에 Mutex 사용.
+			if len(upstreamTargets) == 0 {
+				statsMu.Lock()
+				customStats.ModifiedTimes[file] = info.ModTime()
+				statsMu.Unlock()
+				return
+			}
+
+			var (
+				innerWg sync.WaitGroup
+				healths []UpstreamTargetHealth
+				innerMu sync.Mutex
+			)
+
+			// 각 Upstream Target에 대해 TCP 연결 상태를 비동기적으로 확인을 위한 Goroutine 추가 생성
+			for upstreamName, targets := range upstreamTargets {
+				for _, target := range targets {
+					innerWg.Add(1)
+					go func(upstreamName, target string) {
+						defer innerWg.Done()
+						result, _ := tcpTest(target)
+						innerMu.Lock() // 마찬가지로 Mutex로 공유 변수 접근(Race Condition 방지)
+						healths = append(healths, UpstreamTargetHealth{
+							Target:             target,
+							TargetUpstreamName: upstreamName,
+							Health:             result,
+						})
+						innerMu.Unlock()
+					}(upstreamName, target)
+				}
+			}
+			innerWg.Wait()
+
+			statsMu.Lock()
+			customStats.ModifiedTimes[file] = info.ModTime()
+			customStats.UpstreamHealths[file] = healths
+			statsMu.Unlock()
+		}(file)
 	}
+
+	wg.Wait()
 	return customStats, nil
 }

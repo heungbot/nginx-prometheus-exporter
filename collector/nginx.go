@@ -1,6 +1,7 @@
 package collector
 
 import (
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -51,7 +52,7 @@ func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constL
 			// nginx_upstream_health_check_status
 			prometheus.BuildFQName(namespace, "upstream", "health_check_status"),
 			"Proxy Target의 TCP 연결 상태(1: 성공, 0: 실패)",
-			[]string{"file", "target", "target_name"}, constLabels,
+			[]string{"file", "target", "upstream"}, constLabels,
 		),
 	}
 }
@@ -114,14 +115,22 @@ func (c *NginxCollector) Collect(ch chan<- prometheus.Metric) {
 		)
 	}
 
+	seenUpstreamsMetrics := make(map[string]struct{})
 	for file, healths := range customStats.UpstreamHealths {
 		for _, health := range healths {
+			key := fmt.Sprintf("%s-%s-%s", file, health.Target, health.TargetUpstreamName)
+			if _, seen := seenUpstreamsMetrics[key]; seen {
+				c.logger.Warn("duplicate metric", "file", file, "upstream", health.TargetUpstreamName)
+				continue
+			}
+
+			seenUpstreamsMetrics[key] = struct{}{} // 신규 Metric Key일 경우에 중복 제거를 위한 Map에 등록.
 			ch <- prometheus.MustNewConstMetric(
 				c.upstreamHealthCheckDesc,
 				prometheus.GaugeValue,
 				float64(health.Health),
-				health.Target,
 				file,
+				health.Target,
 				health.TargetUpstreamName,
 			)
 		}

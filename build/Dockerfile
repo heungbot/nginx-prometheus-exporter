@@ -35,4 +35,5 @@ ARG TARGETPLATFORM
 LABEL org.nginx.exporter.image.build.target="${TARGETPLATFORM}"
 LABEL org.nginx.exporter.image.build.version="goreleaser"
 
-COPY --link dist/nginx-prometheus-exporter_linux_$TARGETARCH${TARGETVARIANT/v/_}*/nginx-prometheus-exporter /usr/bin/
+COPY --link --from=builder /go/src/github.com/nginx/nginx-prometheus-exporter/nginx-prometheus-exporter /usr/bin/
+# COPY --link dist/nginx-prometheus-exporter_linux_$TARGETARCH${TARGETVARIANT/v/_}*/nginx-prometheus-exporter /usr/bin/

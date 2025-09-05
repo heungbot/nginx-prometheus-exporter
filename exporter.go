@@ -222,7 +222,7 @@ func main() {
 		}
 	}()
 
-	<-ctx.Done() // Context에 Done 시그널을 보내 goroutine을 종료하고, 대기 중이던 메인 goroutine이 진행된다.
+	<-ctx.Done() // Context에 Done 시그널을 보내 go routine을 종료하고, 대기 중이던 메인 go routine이 진행된다.
 	logger.Info("shutting down")
 
 	// 서버가 종료 신호를 받았을 때 클라 요청을 안전하게 마무리하고 종료하기 위해, 서버 종료 작업에 최대 5초의 제한 시간을 둔 컨텍스트를 생성.

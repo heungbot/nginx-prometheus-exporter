@@ -1,11 +1,8 @@
 package collector
 
 import (
-	"io/fs"
+	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 	"sync"
 
 	"github.com/nginx/nginx-prometheus-exporter/client"
@@ -29,8 +26,9 @@ type NginxCollector struct {
 // NewNginxCollector creates an NginxCollector.
 func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constLabels map[string]string, logger *slog.Logger, nginxConfigPath string) *NginxCollector {
 	return &NginxCollector{
-		nginxClient: nginxClient,
-		logger:      logger,
+		nginxClient:     nginxClient,
+		nginxConfigPath: nginxConfigPath, // Custom을 위한 추가.
+		logger:          logger,
 		metrics: map[string]*prometheus.Desc{
 			"connections_active":   newGlobalMetric(namespace, "connections_active", "Active client connections", constLabels),
 			"connections_accepted": newGlobalMetric(namespace, "connections_accepted", "Accepted client connections", constLabels),
@@ -41,17 +39,21 @@ func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constL
 			"http_requests_total":  newGlobalMetric(namespace, "http_requests_total", "Total http requests", constLabels),
 		},
 		upMetric: newUpMetric(namespace, constLabels),
+
+		// Custom Metric 추가 부분 //
 		configModDesc: prometheus.NewDesc(
+			// nginx_config_last_modified_seconds
 			prometheus.BuildFQName(namespace, "config", "last_modified_seconds"),
 			"NGINX config 파일별 마지막 수정 시각(Unix timestamp)",
 			[]string{"file"}, constLabels,
 		),
+
 		upstreamHealthCheckDesc: prometheus.NewDesc(
+			// nginx_upstream_health_check_status
 			prometheus.BuildFQName(namespace, "upstream", "health_check_status"),
 			"Proxy Target의 TCP 연결 상태(1: 성공, 0: 실패)",
-			[]string{"file", "target"}, constLabels,
+			[]string{"file", "target", "upstream"}, constLabels,
 		),
-		nginxConfigPath: nginxConfigPath,
 	}
 }
 
@@ -59,13 +61,12 @@ func NewNginxCollector(nginxClient *client.NginxClient, namespace string, constL
 // to the provided channel.
 func (c *NginxCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.upMetric.Desc()
+	ch <- c.configModDesc
+	ch <- c.upstreamHealthCheckDesc
 
 	for _, m := range c.metrics {
 		ch <- m
 	}
-
-	ch <- c.configModDesc
-	ch <- c.upstreamHealthCheckDesc
 }
 
 // Collect fetches metrics from NGINX and sends them to the provided channel.
@@ -99,50 +100,39 @@ func (c *NginxCollector) Collect(ch chan<- prometheus.Metric) {
 	ch <- prometheus.MustNewConstMetric(c.metrics["http_requests_total"],
 		prometheus.CounterValue, float64(stats.Requests))
 
-	////// CUSTOM FOR NGINX PROXY //////
-	files := []string{c.nginxConfigPath}                                 // []string{"/home1/irteam/apps/nginx/nginx.conf"}
-	confdDir := filepath.Join(filepath.Dir(c.nginxConfigPath), "conf.d") // "/home1/irteam/apps/nginx/conf.d"
-	// 순회 하면서 files slice에 추가.
-	_ = filepath.WalkDir(confdDir, func(path string, dir fs.DirEntry, err error) error {
-		if err == nil && !dir.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	})
-
-	for _, f := range files {
-		info, err := os.Stat(f)
-		if err != nil || !strings.HasSuffix(info.Name(), ".conf") {
-			c.logger.Warn("skip config file", "file", f, "err", err)
-			continue
-		}
-
-		proxyTargets, err := extractProxyTarget(f)
-		if err != nil {
-			c.logger.Warn("error extracting proxy targets", "file", f, "error", err.Error())
-			continue
-		}
-
-		// prox target 추출 후, tcp 연결 테스트 수행
-		for _, target := range proxyTargets {
-			netResult, err := tcpTest(target)
-			if err != nil {
-				c.logger.Warn("error testing proxy target", "file", f, "target", target, "error", err.Error())
-			}
-			ch <- prometheus.MustNewConstMetric(
-				c.upstreamHealthCheckDesc,
-				prometheus.GaugeValue,
-				netResult,
-				f, target,
-			)
-		}
-
-		// 파일의 마지막 수정 시각을 Unix timestamp로 치환하여 메트릭으로 전송
+	// 커스텀 메트릭 추가 부분 //
+	customStats, err := c.nginxClient.GetCustomStats(c.nginxConfigPath)
+	if err != nil {
+		c.logger.Warn("error getting custom stats", "error", err)
+		return
+	}
+	for file, modTime := range customStats.ModifiedTimes {
 		ch <- prometheus.MustNewConstMetric(
 			c.configModDesc,
 			prometheus.GaugeValue,
-			float64(info.ModTime().Unix()),
-			f,
+			float64(modTime.Unix()),
+			file,
 		)
+	}
+
+	seenUpstreamsMetrics := make(map[string]struct{})
+	for file, healths := range customStats.UpstreamHealths {
+		for _, health := range healths {
+			key := fmt.Sprintf("%s-%s-%s", file, health.Target, health.TargetUpstreamName)
+			if _, seen := seenUpstreamsMetrics[key]; seen {
+				c.logger.Warn("duplicate metric", "file", file, "upstream", health.TargetUpstreamName)
+				continue
+			}
+
+			seenUpstreamsMetrics[key] = struct{}{} // 신규 Metric Key일 경우에 중복 제거를 위한 Map에 등록.
+			ch <- prometheus.MustNewConstMetric(
+				c.upstreamHealthCheckDesc,
+				prometheus.GaugeValue,
+				float64(health.Health),
+				file,
+				health.Target,
+				health.TargetUpstreamName,
+			)
+		}
 	}
 }

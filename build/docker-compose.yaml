@@ -1,0 +1,26 @@
+version: "3.8"
+
+services:
+  nginx:
+    container_name: nginx
+    image: nginx:latest
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+#
+#  exporter:
+#    build:
+#      context: .
+#      dockerfile: build/Dockerfile
+#      target: container
+#      args:
+#        VERSION: "test"
+#    environment:
+#      NGINX_URI: "http://nginx:80/stub_status"
+#      NGINX_CONFIG_PATH: "/etc/nginx/nginx.conf"
+#    ports:
+#      - "9113:9113"
+#    depends_on:
+#      - nginx
+
